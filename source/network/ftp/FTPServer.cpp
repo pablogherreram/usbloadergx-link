@@ -5,23 +5,24 @@
  * PASV-only operation, mandatory authentication and a fixed sd:/ root.
  * It deliberately contains no NAND, ISFS, USB, DVD or executable-loader API.
  */
+#include <gccore.h>
+#include <network.h>
+#include <ogc/lwp.h>
+
 #include "FTPServer.h"
 #include "FTPPath.h"
 #include "network/networkops.h"
 #include "settings/CSettings.h"
 #include "gecko.h"
 
-#include <network.h>
-#include <ogc/lwp.h>
 #include <dirent.h>
 #include <errno.h>
-#include <gccore.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #include <time.h>
+#include <unistd.h>
 
 namespace {
 static lwp_t g_thread = LWP_THREAD_NULL;
