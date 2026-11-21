@@ -64,15 +64,45 @@ static bool isPhysicalRoot(const char *path) { return path && !strcmp(path, "sd:
 static bool requireLogin(Session &ss, s32 c) { if (ss.loggedIn) return true; reply(c, 530, "Please login with USER and PASS."); return false; }
 static bool requireWrite(Session &ss, s32 c) { if (!requireLogin(ss, c)) return false; if (Settings.FTPWriteAccess) return true; reply(c, 550, "Write access is disabled in USB Loader GX Link."); return false; }
 
-static s32 openPassive(s32 c, Session &ss) {
+static const u16 kPassivePort = 2122;
+
+static s32 openPassive(s32 c, Session &ss, bool extended) {
     if (ss.pasv >= 0) { closeSocket(ss.pasv); g_passive = -1; }
-    s32 s = net_socket(AF_INET, SOCK_STREAM, IPPROTO_IP); if (s < 0) { reply(c, 425, "Cannot create passive socket."); return -1; }
-    sockaddr_in a; memset(&a, 0, sizeof(a)); a.sin_family = AF_INET; a.sin_addr.s_addr = INADDR_ANY; a.sin_port = 0;
-    if (net_bind(s, (sockaddr*)&a, sizeof(a)) < 0 || net_listen(s, 1) < 0) { net_close(s); reply(c, 425, "Cannot enter passive mode."); return -1; }
-    socklen_t alen = sizeof(a); if (net_getsockname(s, (sockaddr*)&a, &alen) < 0) { net_close(s); reply(c, 425, "Cannot determine passive port."); return -1; }
-    unsigned ip1=127,ip2=0,ip3=0,ip4=1; sscanf(GetNetworkIP(), "%u.%u.%u.%u", &ip1,&ip2,&ip3,&ip4);
-    unsigned port = ntohs(a.sin_port); char msg[128]; snprintf(msg, sizeof(msg), "Entering Passive Mode (%u,%u,%u,%u,%u,%u).", ip1,ip2,ip3,ip4,port/256,port%256);
-    ss.pasv = s; g_passive = s; reply(c, 227, msg); return s;
+
+    s32 s = net_socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if (s < 0) { reply(c, 425, "Cannot create passive socket."); return -1; }
+
+    int one = 1;
+    net_setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+    sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = INADDR_ANY;
+    a.sin_port = htons(kPassivePort);
+
+    if (net_bind(s, (sockaddr*)&a, sizeof(a)) < 0 || net_listen(s, 1) < 0) {
+        net_close(s);
+        reply(c, 425, "Cannot enter passive mode.");
+        return -1;
+    }
+
+    ss.pasv = s;
+    g_passive = s;
+
+    if (extended) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "Entering Extended Passive Mode (|||%u|).", (unsigned)kPassivePort);
+        reply(c, 229, msg);
+    } else {
+        unsigned ip1=127, ip2=0, ip3=0, ip4=1;
+        sscanf(GetNetworkIP(), "%u.%u.%u.%u", &ip1, &ip2, &ip3, &ip4);
+        char msg[128];
+        snprintf(msg, sizeof(msg), "Entering Passive Mode (%u,%u,%u,%u,%u,%u).",
+                 ip1, ip2, ip3, ip4, kPassivePort / 256, kPassivePort % 256);
+        reply(c, 227, msg);
+    }
+    return s;
 }
 static s32 acceptData(Session &ss, s32 c) {
     if (ss.pasv < 0) { reply(c, 425, "Use PASV first."); return -1; }
@@ -107,12 +137,13 @@ static void handleClient(s32 c) {
             else if(!strcmp(commandLine,"QUIT")){reply(c,221,"Goodbye.");return;}
             else if(!strcmp(commandLine,"NOOP"))reply(c,200,"OK.");
             else if(!strcmp(commandLine,"SYST"))reply(c,215,"UNIX Type: L8");
-            else if(!strcmp(commandLine,"FEAT")){const char *features="211-Features\r\n PASV\r\n SIZE\r\n UTF8\r\n211 End\r\n";sendAll(c,features,strlen(features));}
+            else if(!strcmp(commandLine,"FEAT")){const char *features="211-Features\r\n EPSV\r\n PASV\r\n SIZE\r\n UTF8\r\n211 End\r\n";sendAll(c,features,strlen(features));}
             else if(!strcmp(commandLine,"OPTS"))reply(c,200,"UTF8 enabled.");
             else if(!strcmp(commandLine,"TYPE")){if(requireLogin(ss,c))reply(c,200,"Type set.");}
             else if(!strcmp(commandLine,"PWD")){if(requireLogin(ss,c)){char m[900];snprintf(m,sizeof(m),"\"%s\" is current directory.",ss.cwd);reply(c,257,m);}}
             else if(!strcmp(commandLine,"CWD")||!strcmp(commandLine,"CDUP")){if(requireLogin(ss,c)){char p[1024],v[768];const char *target=!strcmp(commandLine,"CDUP")?"..":arg;struct stat st;if(resolve(ss,target,p,sizeof(p),v,sizeof(v))&&stat(p,&st)==0&&S_ISDIR(st.st_mode)){strcpy(ss.cwd,v);reply(c,250,"Directory changed.");}else reply(c,550,"Directory unavailable.");}}
-            else if(!strcmp(commandLine,"PASV")){if(requireLogin(ss,c))openPassive(c,ss);}
+            else if(!strcmp(commandLine,"EPSV")){if(requireLogin(ss,c))openPassive(c,ss,true);}
+            else if(!strcmp(commandLine,"PASV")){if(requireLogin(ss,c))openPassive(c,ss,false);}
             else if(!strcmp(commandLine,"LIST")){if(requireLogin(ss,c))listPath(ss,c,arg,false);}
             else if(!strcmp(commandLine,"NLST")){if(requireLogin(ss,c))listPath(ss,c,arg,true);}
             else if(!strcmp(commandLine,"SIZE")){if(requireLogin(ss,c)){char p[1024],m[64];struct stat st;if(resolve(ss,arg,p,sizeof(p))&&stat(p,&st)==0&&S_ISREG(st.st_mode)){snprintf(m,sizeof(m),"%lu",(unsigned long)st.st_size);reply(c,213,m);}else reply(c,550,"File unavailable.");}}
