@@ -103,6 +103,12 @@ class CSettings
 		char ProxyUsername[33];
 		char ProxyPassword[33];
 		char ProxyAddress[256];
+
+		// USB Loader GX Link: SD-only FTP settings
+		int FTPEnabled;
+		int FTPPort;
+		int FTPWriteAccess;
+		char FTPPassword[33];
 		u16 ProxyPort;
 		short ProxyUseSystem;
 		short videomode;

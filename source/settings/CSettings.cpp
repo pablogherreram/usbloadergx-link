@@ -136,6 +136,10 @@ void CSettings::SetDefault()
 	quickboot = OFF;
 	wiilight = WIILIGHT_ON;
 	autonetwork = ON;
+	FTPEnabled = OFF;
+	FTPPort = 2121;
+	FTPWriteAccess = ON;
+	FTPPassword[0] = 0;
 	patchcountrystrings = OFF;
 	TitlesType = TITLETYPE_FROMWIITDB;
 	CacheCheck = ON;
@@ -547,6 +551,10 @@ bool CSettings::Save()
 	fprintf(file, "ProxyPassword = %s\n", ProxyPassword);
 	fprintf(file, "ProxyAddress = %s\n", ProxyAddress);
 	fprintf(file, "ProxyPort = %d\n", ProxyPort);
+	fprintf(file, "FTPEnabled = %d\n", FTPEnabled);
+	fprintf(file, "FTPPort = %d\n", FTPPort);
+	fprintf(file, "FTPWriteAccess = %d\n", FTPWriteAccess);
+	fprintf(file, "FTPPassword = %s\n", FTPPassword);
 	fclose(file);
 
 	return true;
@@ -1454,6 +1462,19 @@ bool CSettings::SetSetting(char *name, char *value)
 		if (ValidateURL(value, 2))
 			strlcpy(URL_Cheats, value, sizeof(URL_Cheats));
 		return true;
+	}
+	else if (strcmp(name, "FTPEnabled") == 0)
+		FTPEnabled = atoi(value) ? ON : OFF;
+	else if (strcmp(name, "FTPPort") == 0)
+	{
+		FTPPort = atoi(value);
+		if (FTPPort < 1024 || FTPPort > 65535) FTPPort = 2121;
+	}
+	else if (strcmp(name, "FTPWriteAccess") == 0)
+		FTPWriteAccess = atoi(value) ? ON : OFF;
+	else if (strcmp(name, "FTPPassword") == 0)
+	{
+		strlcpy(FTPPassword, value, sizeof(FTPPassword));
 	}
 	else if (strcmp(name, "ProxyUseSystem") == 0)
 	{

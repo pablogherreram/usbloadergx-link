@@ -18,6 +18,7 @@
 #include "mload/mload.h"
 #include "mload/mload_modules.h"
 #include "network/networkops.h"
+#include "network/ftp/FTPServer.h"
 #include "patches/patchcode.h"
 #include "settings/menus/GlobalSettings.hpp"
 #include "settings/CGameSettings.h"
@@ -167,6 +168,10 @@ int MainMenu(int menu)
 	currentMenu = menu;
 
 	InitNetworkThread();
+
+	// Start the configured SD-only FTP service after network synchronization exists.
+	if (Settings.FTPEnabled)
+		FTPServer::Start();
 
 	InitGUIThreads();
 

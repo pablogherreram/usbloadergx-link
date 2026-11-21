@@ -14,6 +14,7 @@
 #include "settings/meta.h"
 #include "language/gettext.h"
 #include "network/networkops.h"
+#include "network/ftp/FTPServer.h"
 #include "utils/ResourceManager.h"
 #include "usbloader/playlog.h"
 #include "usbloader/wbfs.h"
@@ -117,6 +118,7 @@ void AppCleanUp(void)
 	ThreadedTask::DestroyInstance();
 	SoundHandler::DestroyInstance();
 	GCGames::DestroyInstance();
+	FTPServer::Stop();
 	DeinitNetwork();
 	GameTitles.SetDefault();
 

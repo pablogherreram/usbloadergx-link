@@ -32,6 +32,7 @@
 #include "SoundSettingsMenu.hpp"
 #include "CustomPathsSM.hpp"
 #include "FeatureSettingsMenu.hpp"
+#include "FTPSettingsMenu.hpp"
 #include "HardDriveSM.hpp"
 #include "BannerSettingsMenu.hpp"
 #include "UpdateSM.hpp"
@@ -76,6 +77,7 @@ void GlobalSettings::SetupMainButtons()
 	SetMainButton(pos++, tr( "Loader Settings" ), MainButtonImgData, MainButtonImgOverData);
 	SetMainButton(pos++, tr( "Hard Drive Settings" ), MainButtonImgData, MainButtonImgOverData);
 	SetMainButton(pos++, tr( "Miscellaneous Settings" ), MainButtonImgData, MainButtonImgOverData);
+	SetMainButton(pos++, tr( "FTP Settings" ), MainButtonImgData, MainButtonImgOverData);
 	SetMainButton(pos++, tr( "Banner Settings" ), MainButtonImgData, MainButtonImgOverData);
 	SetMainButton(pos++, tr( "Sound Settings" ), MainButtonImgData, MainButtonImgOverData);
 	SetMainButton(pos++, tr( "Parental Control" ), MainButtonImgData, MainButtonImgOverData);
@@ -147,6 +149,20 @@ void GlobalSettings::CreateSettingsMenu(int menuNr)
 		HideMenu();
 		ResumeGui();
 		CurrentMenu = new FeatureSettingsMenu();
+		Append(CurrentMenu);
+	}
+	//! FTP Settings (USB Loader GX Link)
+	else if(menuNr == Idx++)
+	{
+		if(!Settings.godmode && (Settings.ParentalBlocks & BLOCK_FEATURE_SETTINGS))
+		{
+			WindowPrompt(tr( "Permission denied." ), tr( "Console must be unlocked for this option." ), tr( "OK" ));
+			return;
+		}
+
+		HideMenu();
+		ResumeGui();
+		CurrentMenu = new FTPSettingsMenu();
 		Append(CurrentMenu);
 	}
 	//! Banner Settings
