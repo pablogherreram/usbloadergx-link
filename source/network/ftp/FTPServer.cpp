@@ -113,7 +113,6 @@ static s32 openPassive(s32 c, Session &ss, bool extended) {
     a.sin_addr.s_addr = INADDR_ANY;
     a.sin_port = htons(kPassivePort);
 
-    tuneDataSocket(s);
     if (net_bind(s, (sockaddr*)&a, sizeof(a)) < 0 || net_listen(s, 1) < 0) {
         net_close(s);
         reply(c, 425, "Cannot enter passive mode.");
@@ -228,11 +227,11 @@ static void *serverThread(void *) {
     g_status=FTPServer::Starting; Initialize_Network(5); if(g_stop){g_status=FTPServer::Disabled;return 0;} if(!IsNetworkInit()){g_status=FTPServer::Error;return 0;}
     s32 s=net_socket(AF_INET,SOCK_STREAM,IPPROTO_IP); if(s<0){g_status=FTPServer::Error;return 0;} g_listener=s; int one=1; net_setsockopt(s,SOL_SOCKET,SO_REUSEADDR,&one,sizeof(one)); sockaddr_in a;memset(&a,0,sizeof(a));a.sin_family=AF_INET;a.sin_addr.s_addr=INADDR_ANY;a.sin_port=htons((u16)Settings.FTPPort);
     if(net_bind(s,(sockaddr*)&a,sizeof(a))<0||net_listen(s,1)<0){closeSocket(g_listener);g_status=FTPServer::Error;return 0;} g_status=FTPServer::Online; gprintf("FTP: SD-only server online at %s:%d\n",GetNetworkIP(),Settings.FTPPort);
-    while(!g_stop){sockaddr_in ca;socklen_t len=sizeof(ca);s32 c=net_accept(s,(sockaddr*)&ca,&len);if(c<0){if(g_stop)break;usleep(100000);continue;}g_control=c;tuneDataSocket(g_control);handleClient(c);closeSocket(g_control);} closeSocket(g_listener);g_status=FTPServer::Disabled;return 0;
+    while(!g_stop){sockaddr_in ca;socklen_t len=sizeof(ca);s32 c=net_accept(s,(sockaddr*)&ca,&len);if(c<0){if(g_stop)break;usleep(100000);continue;}g_control=c;handleClient(c);closeSocket(g_control);} closeSocket(g_listener);g_status=FTPServer::Disabled;return 0;
 }
 }
 
-bool FTPServer::Start(){if(!Settings.FTPEnabled||!Settings.FTPPassword[0])return false;if(g_thread!=LWP_THREAD_NULL)return true;g_stop=false;g_status=Starting;if(LWP_CreateThread(&g_thread,serverThread,0,g_stack,kStackSize,60)!=0){g_thread=LWP_THREAD_NULL;g_status=Error;return false;}return true;}
+bool FTPServer::Start(){if(!Settings.FTPEnabled||!Settings.FTPPassword[0])return false;if(g_thread!=LWP_THREAD_NULL)return true;g_stop=false;g_status=Starting;if(LWP_CreateThread(&g_thread,serverThread,0,g_stack,kStackSize,70)!=0){g_thread=LWP_THREAD_NULL;g_status=Error;return false;}return true;}
 void FTPServer::Stop(){g_stop=true;closeSocket(g_passive);closeSocket(g_control);closeSocket(g_listener);if(g_thread!=LWP_THREAD_NULL){LWP_JoinThread(g_thread,0);g_thread=LWP_THREAD_NULL;}g_status=Disabled;}
 void FTPServer::Restart(){Stop();if(Settings.FTPEnabled)Start();}
 FTPServer::Status FTPServer::GetStatus(){return g_status;}
