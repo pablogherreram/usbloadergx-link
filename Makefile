@@ -29,6 +29,7 @@ SOURCES		:=	source \
 				source/usbloader \
 				source/xml \
 				source/network \
+				source/network/ftp \
 				source/settings \
 				source/settings/menus \
 				source/prompts \
