@@ -42,10 +42,42 @@ struct Session {
     Session() : userOk(false), loggedIn(false), pasv(-1) { strcpy(cwd, "/"); renameFrom[0] = 0; }
 };
 
-static void closeSocket(s32 &s) { if (s >= 0) { net_shutdown(s, 2); net_close(s); s = -1; } }
+static const size_t kTransferBufferSize = 32 * 1024;
+static const size_t kSocketChunkSize = 8 * 1024;
+static const int kSocketBufferSize = 32 * 1024;
+static u8 g_transferBuffer[kTransferBufferSize] ATTRIBUTE_ALIGN(32);
+
+static void closeSocket(s32 &s) {
+    if (s >= 0) {
+        net_shutdown(s, 2);
+        net_close(s);
+        s = -1;
+    }
+}
+
+static void tuneDataSocket(s32 s) {
+    if (s < 0) return;
+    int bufferSize = kSocketBufferSize;
+    net_setsockopt(s, SOL_SOCKET, SO_SNDBUF, &bufferSize, sizeof(bufferSize));
+    net_setsockopt(s, SOL_SOCKET, SO_RCVBUF, &bufferSize, sizeof(bufferSize));
+}
+
 static bool sendAll(s32 s, const void *data, size_t len) {
-    const char *p = (const char *)data;
-    while (len && !g_stop) { s32 n = net_send(s, p, len, 0); if (n <= 0) return false; p += n; len -= n; }
+    const u8 *p = static_cast<const u8 *>(data);
+    while (len && !g_stop) {
+        size_t request = len > kSocketChunkSize ? kSocketChunkSize : len;
+        s32 n = net_send(s, p, request, 0);
+        if (n > 0) {
+            p += n;
+            len -= static_cast<size_t>(n);
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+            usleep(1000);
+            continue;
+        }
+        return false;
+    }
     return len == 0;
 }
 static bool reply(s32 s, int code, const char *text) {
@@ -81,6 +113,7 @@ static s32 openPassive(s32 c, Session &ss, bool extended) {
     a.sin_addr.s_addr = INADDR_ANY;
     a.sin_port = htons(kPassivePort);
 
+    tuneDataSocket(s);
     if (net_bind(s, (sockaddr*)&a, sizeof(a)) < 0 || net_listen(s, 1) < 0) {
         net_close(s);
         reply(c, 425, "Cannot enter passive mode.");
@@ -105,8 +138,17 @@ static s32 openPassive(s32 c, Session &ss, bool extended) {
     return s;
 }
 static s32 acceptData(Session &ss, s32 c) {
-    if (ss.pasv < 0) { reply(c, 425, "Use PASV first."); return -1; }
-    sockaddr_in a; socklen_t len=sizeof(a); s32 d=net_accept(ss.pasv,(sockaddr*)&a,&len); closeSocket(ss.pasv); g_passive=-1; return d;
+    if (ss.pasv < 0) {
+        reply(c, 425, "Use PASV or EPSV first.");
+        return -1;
+    }
+    sockaddr_in a;
+    socklen_t len = sizeof(a);
+    s32 d = net_accept(ss.pasv, (sockaddr*)&a, &len);
+    closeSocket(ss.pasv);
+    g_passive = -1;
+    if (d >= 0) tuneDataSocket(d);
+    return d;
 }
 static void formatListLine(char *out, size_t size, const char *name, const struct stat &st) {
     char date[32]="Jan 01  1980"; struct tm *tmv=localtime(&st.st_mtime); if(tmv) strftime(date,sizeof(date),"%b %d %H:%M",tmv);
@@ -122,9 +164,31 @@ static bool listPath(Session &ss, s32 c, const char *arg, bool namesOnly) {
 static bool transferFile(Session &ss,s32 c,const char *arg,bool upload,bool append){
     char path[1024]; if(!resolve(ss,arg,path,sizeof(path)) || (upload && isPhysicalRoot(path))){reply(c,550,"Invalid path.");return false;}
     FILE *f=fopen(path,upload?(append?"ab":"wb"):"rb"); if(!f){reply(c,550,"Cannot open file.");return false;}
-    reply(c,150,"Opening passive data connection."); s32 d=acceptData(ss,c); if(d<0){fclose(f);return false;} char buf[32768]; bool ok=true;
-    if(upload){ while(!g_stop){s32 n=net_recv(d,buf,sizeof(buf),0); if(n==0)break; if(n<0){ok=false;break;} if(fwrite(buf,1,n,f)!=(size_t)n){ok=false;break;}} }
-    else { size_t n; while(!g_stop&&(n=fread(buf,1,sizeof(buf),f))>0) if(!sendAll(d,buf,n)){ok=false;break;} if(ferror(f))ok=false; }
+    reply(c,150,"Opening passive data connection.");
+    s32 d=acceptData(ss,c);
+    if(d<0){fclose(f);return false;}
+    u8 *buf = g_transferBuffer;
+    bool ok=true;
+    if(upload){
+        while(!g_stop){
+            s32 n=net_recv(d,buf,kTransferBufferSize,0);
+            if(n==0) break;
+            if(n<0){
+                if(errno==EAGAIN || errno==EWOULDBLOCK || errno==EINTR){usleep(1000);continue;}
+                ok=false;
+                break;
+            }
+            if(fwrite(buf,1,(size_t)n,f)!=(size_t)n){ok=false;break;}
+        }
+        if(fflush(f)!=0) ok=false;
+    }
+    else {
+        size_t n;
+        while(!g_stop && (n=fread(buf,1,kTransferBufferSize,f))>0){
+            if(!sendAll(d,buf,n)){ok=false;break;}
+        }
+        if(ferror(f)) ok=false;
+    }
     fclose(f); closeSocket(d); reply(c,ok?226:426,ok?"Transfer complete.":"Transfer aborted."); return ok;
 }
 static void handleClient(s32 c) {
@@ -164,11 +228,11 @@ static void *serverThread(void *) {
     g_status=FTPServer::Starting; Initialize_Network(5); if(g_stop){g_status=FTPServer::Disabled;return 0;} if(!IsNetworkInit()){g_status=FTPServer::Error;return 0;}
     s32 s=net_socket(AF_INET,SOCK_STREAM,IPPROTO_IP); if(s<0){g_status=FTPServer::Error;return 0;} g_listener=s; int one=1; net_setsockopt(s,SOL_SOCKET,SO_REUSEADDR,&one,sizeof(one)); sockaddr_in a;memset(&a,0,sizeof(a));a.sin_family=AF_INET;a.sin_addr.s_addr=INADDR_ANY;a.sin_port=htons((u16)Settings.FTPPort);
     if(net_bind(s,(sockaddr*)&a,sizeof(a))<0||net_listen(s,1)<0){closeSocket(g_listener);g_status=FTPServer::Error;return 0;} g_status=FTPServer::Online; gprintf("FTP: SD-only server online at %s:%d\n",GetNetworkIP(),Settings.FTPPort);
-    while(!g_stop){sockaddr_in ca;socklen_t len=sizeof(ca);s32 c=net_accept(s,(sockaddr*)&ca,&len);if(c<0){if(g_stop)break;usleep(100000);continue;}g_control=c;handleClient(c);closeSocket(g_control);} closeSocket(g_listener);g_status=FTPServer::Disabled;return 0;
+    while(!g_stop){sockaddr_in ca;socklen_t len=sizeof(ca);s32 c=net_accept(s,(sockaddr*)&ca,&len);if(c<0){if(g_stop)break;usleep(100000);continue;}g_control=c;tuneDataSocket(g_control);handleClient(c);closeSocket(g_control);} closeSocket(g_listener);g_status=FTPServer::Disabled;return 0;
 }
 }
 
-bool FTPServer::Start(){if(!Settings.FTPEnabled||!Settings.FTPPassword[0])return false;if(g_thread!=LWP_THREAD_NULL)return true;g_stop=false;g_status=Starting;if(LWP_CreateThread(&g_thread,serverThread,0,g_stack,kStackSize,70)!=0){g_thread=LWP_THREAD_NULL;g_status=Error;return false;}return true;}
+bool FTPServer::Start(){if(!Settings.FTPEnabled||!Settings.FTPPassword[0])return false;if(g_thread!=LWP_THREAD_NULL)return true;g_stop=false;g_status=Starting;if(LWP_CreateThread(&g_thread,serverThread,0,g_stack,kStackSize,60)!=0){g_thread=LWP_THREAD_NULL;g_status=Error;return false;}return true;}
 void FTPServer::Stop(){g_stop=true;closeSocket(g_passive);closeSocket(g_control);closeSocket(g_listener);if(g_thread!=LWP_THREAD_NULL){LWP_JoinThread(g_thread,0);g_thread=LWP_THREAD_NULL;}g_status=Disabled;}
 void FTPServer::Restart(){Stop();if(Settings.FTPEnabled)Start();}
 FTPServer::Status FTPServer::GetStatus(){return g_status;}

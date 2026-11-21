@@ -41,8 +41,8 @@ void FTPSettingsMenu::SetOptionValues() {
 void FTPSettingsMenu::GeneratePassword() {
     static const char chars[]="ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
     u64 seed=gettime();
-    for(int i=0;i<12;i++){ seed=seed*6364136223846793005ULL+1; Settings.FTPPassword[i]=chars[(seed>>32)%(sizeof(chars)-1)]; }
-    Settings.FTPPassword[12]=0;
+    for(int i=0;i<10;i++){ seed=seed*6364136223846793005ULL+1; Settings.FTPPassword[i]=chars[(seed>>32)%(sizeof(chars)-1)]; }
+    Settings.FTPPassword[10]=0;
 }
 int FTPSettingsMenu::GetMenuInternal() {
     int ret=optionBrowser->GetClickedOption(); if(ret<0){SetOptionValues();return MENU_NONE;}
