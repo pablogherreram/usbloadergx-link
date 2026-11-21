@@ -42,10 +42,16 @@ struct Session {
     Session() : userOk(false), loggedIn(false), pasv(-1) { strcpy(cwd, "/"); renameFrom[0] = 0; }
 };
 
+// libogc forwards Wii socket I/O to IOS. Keep each IPC transfer at the
+// documented 32 KiB ceiling and use aligned MEM1 buffers.
 static const size_t kTransferBufferSize = 32 * 1024;
-static const size_t kSocketChunkSize = 8 * 1024;
+static const size_t kSocketChunkSize = 32 * 1024;
 static const int kSocketBufferSize = 32 * 1024;
+static const u16 kPassivePortFirst = 2122;
+static const u16 kPassivePortLast = 2131;
+static u16 g_nextPassivePort = kPassivePortFirst;
 static u8 g_transferBuffer[kTransferBufferSize] ATTRIBUTE_ALIGN(32);
+static u8 g_fileBuffer[64 * 1024] ATTRIBUTE_ALIGN(32);
 
 static void closeSocket(s32 &s) {
     if (s >= 0) {
@@ -96,46 +102,71 @@ static bool isPhysicalRoot(const char *path) { return path && !strcmp(path, "sd:
 static bool requireLogin(Session &ss, s32 c) { if (ss.loggedIn) return true; reply(c, 530, "Please login with USER and PASS."); return false; }
 static bool requireWrite(Session &ss, s32 c) { if (!requireLogin(ss, c)) return false; if (Settings.FTPWriteAccess) return true; reply(c, 550, "Write access is disabled in USB Loader GX Link."); return false; }
 
-static const u16 kPassivePort = 2122;
-
 static s32 openPassive(s32 c, Session &ss, bool extended) {
-    if (ss.pasv >= 0) { closeSocket(ss.pasv); g_passive = -1; }
+    if (ss.pasv >= 0) {
+        closeSocket(ss.pasv);
+        g_passive = -1;
+    }
 
-    s32 s = net_socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-    if (s < 0) { reply(c, 425, "Cannot create passive socket."); return -1; }
+    s32 listener = -1;
+    u16 selectedPort = 0;
+    const unsigned portCount = kPassivePortLast - kPassivePortFirst + 1;
 
-    int one = 1;
-    net_setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    // Rotate through a small passive range. This avoids immediately reusing a
+    // TCP endpoint that IOS may still hold in TIME_WAIT after the prior RETR,
+    // while SO_REUSEADDR handles ordinary quick reconnects.
+    for (unsigned attempt = 0; attempt < portCount; ++attempt) {
+        u16 port = g_nextPassivePort;
+        ++g_nextPassivePort;
+        if (g_nextPassivePort > kPassivePortLast)
+            g_nextPassivePort = kPassivePortFirst;
 
-    sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = INADDR_ANY;
-    a.sin_port = htons(kPassivePort);
+        s32 candidate = net_socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+        if (candidate < 0)
+            continue;
 
-    if (net_bind(s, (sockaddr*)&a, sizeof(a)) < 0 || net_listen(s, 1) < 0) {
-        net_close(s);
+        int reuse = 1;
+        net_setsockopt(candidate, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+        sockaddr_in address;
+        memset(&address, 0, sizeof(address));
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = INADDR_ANY;
+        address.sin_port = htons(port);
+
+        if (net_bind(candidate, (sockaddr *)&address, sizeof(address)) == 0 &&
+            net_listen(candidate, 1) == 0) {
+            listener = candidate;
+            selectedPort = port;
+            break;
+        }
+        net_close(candidate);
+    }
+
+    if (listener < 0) {
         reply(c, 425, "Cannot enter passive mode.");
         return -1;
     }
 
-    ss.pasv = s;
-    g_passive = s;
+    ss.pasv = listener;
+    g_passive = listener;
 
+    char msg[128];
     if (extended) {
-        char msg[96];
-        snprintf(msg, sizeof(msg), "Entering Extended Passive Mode (|||%u|).", (unsigned)kPassivePort);
+        snprintf(msg, sizeof(msg), "Entering Extended Passive Mode (|||%u|).",
+                 (unsigned)selectedPort);
         reply(c, 229, msg);
     } else {
-        unsigned ip1=127, ip2=0, ip3=0, ip4=1;
+        unsigned ip1 = 127, ip2 = 0, ip3 = 0, ip4 = 1;
         sscanf(GetNetworkIP(), "%u.%u.%u.%u", &ip1, &ip2, &ip3, &ip4);
-        char msg[128];
-        snprintf(msg, sizeof(msg), "Entering Passive Mode (%u,%u,%u,%u,%u,%u).",
-                 ip1, ip2, ip3, ip4, kPassivePort / 256, kPassivePort % 256);
+        snprintf(msg, sizeof(msg),
+                 "Entering Passive Mode (%u,%u,%u,%u,%u,%u).",
+                 ip1, ip2, ip3, ip4, selectedPort / 256, selectedPort % 256);
         reply(c, 227, msg);
     }
-    return s;
+    return listener;
 }
+
 static s32 acceptData(Session &ss, s32 c) {
     if (ss.pasv < 0) {
         reply(c, 425, "Use PASV or EPSV first.");
@@ -163,6 +194,7 @@ static bool listPath(Session &ss, s32 c, const char *arg, bool namesOnly) {
 static bool transferFile(Session &ss,s32 c,const char *arg,bool upload,bool append){
     char path[1024]; if(!resolve(ss,arg,path,sizeof(path)) || (upload && isPhysicalRoot(path))){reply(c,550,"Invalid path.");return false;}
     FILE *f=fopen(path,upload?(append?"ab":"wb"):"rb"); if(!f){reply(c,550,"Cannot open file.");return false;}
+    setvbuf(f, (char *)g_fileBuffer, _IOFBF, sizeof(g_fileBuffer));
     reply(c,150,"Opening passive data connection.");
     s32 d=acceptData(ss,c);
     if(d<0){fclose(f);return false;}
@@ -231,7 +263,7 @@ static void *serverThread(void *) {
 }
 }
 
-bool FTPServer::Start(){if(!Settings.FTPEnabled||!Settings.FTPPassword[0])return false;if(g_thread!=LWP_THREAD_NULL)return true;g_stop=false;g_status=Starting;if(LWP_CreateThread(&g_thread,serverThread,0,g_stack,kStackSize,70)!=0){g_thread=LWP_THREAD_NULL;g_status=Error;return false;}return true;}
+bool FTPServer::Start(){if(!Settings.FTPEnabled||!Settings.FTPPassword[0])return false;if(g_thread!=LWP_THREAD_NULL)return true;g_stop=false;g_status=Starting;if(LWP_CreateThread(&g_thread,serverThread,0,g_stack,kStackSize,40)!=0){g_thread=LWP_THREAD_NULL;g_status=Error;return false;}return true;}
 void FTPServer::Stop(){g_stop=true;closeSocket(g_passive);closeSocket(g_control);closeSocket(g_listener);if(g_thread!=LWP_THREAD_NULL){LWP_JoinThread(g_thread,0);g_thread=LWP_THREAD_NULL;}g_status=Disabled;}
 void FTPServer::Restart(){Stop();if(Settings.FTPEnabled)Start();}
 FTPServer::Status FTPServer::GetStatus(){return g_status;}
